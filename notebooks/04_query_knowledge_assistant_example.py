@@ -16,10 +16,9 @@ import os
 import mlflow
 from mlflow.deployments import get_deploy_client
 
-ENDPOINT_NAME = dbutils.widgets.get("endpoint_name") if "endpoint_name" in [w.name for w in dbutils.widgets.getAll()] else ""
-if not ENDPOINT_NAME:
-    dbutils.widgets.text("endpoint_name", "REPLACE_WITH_YOUR_KA_ENDPOINT", "endpoint_name")
-    ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
+# Create widget with default value
+dbutils.widgets.text("endpoint_name", "REPLACE_WITH_YOUR_KA_ENDPOINT", "endpoint_name")
+ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
 
 QUESTION = "What does the FEMA basics doc recommend for households?"
 

@@ -1,0 +1,89 @@
+name: Eval gate
+
+# Deploys the bundle, runs the eval job in the workspace, and commits the
+# regenerated report. The job exits non-zero when the gate fails, which fails
+# this workflow. Needs two repository secrets: DATABRICKS_HOST and
+# DATABRICKS_TOKEN (a service principal token with access to the catalog).
+
+on:
+  workflow_dispatch:
+    inputs:
+      catalog:
+        description: Unity Catalog catalog
+        default: main
+      schema:
+        description: Schema
+        default: ab_demo
+      run_cost:
+        description: Also refresh the cost section (needs a SQL warehouse id secret)
+        type: boolean
+        default: false
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC, drift check
+
+concurrency:
+  group: eval-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  eval:
+    name: deploy + eval + report
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      ABX_CATALOG: ${{ inputs.catalog || 'main' }}
+      ABX_SCHEMA: ${{ inputs.schema || 'ab_demo' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install build tooling and the package
+        run: pip install build -e .
+      - name: Offline validation of seed, corpus and thresholds
+        run: abx validate
+      - uses: databricks/setup-cli@main
+
+      - name: Validate and deploy bundle
+        run: |
+          databricks bundle validate -t dev --var="catalog=$ABX_CATALOG" --var="schema=$ABX_SCHEMA"
+          databricks bundle deploy   -t dev --var="catalog=$ABX_CATALOG" --var="schema=$ABX_SCHEMA"
+
+      - name: Run eval job (fails when the gate fails)
+        id: eval
+        run: databricks bundle run eval_job -t dev --var="catalog=$ABX_CATALOG" --var="schema=$ABX_SCHEMA"
+
+      - name: Run cost job
+        if: ${{ inputs.run_cost }}
+        run: |
+          databricks bundle run cost_job -t dev \
+            --var="catalog=$ABX_CATALOG" --var="schema=$ABX_SCHEMA" \
+            --var="sql_warehouse_id=${{ secrets.DATABRICKS_SQL_WAREHOUSE_ID }}"
+
+      - name: Fetch the report from the volume
+        if: always() && steps.eval.outcome != 'skipped'
+        run: |
+          mkdir -p reports
+          databricks fs cp "dbfs:/Volumes/$ABX_CATALOG/$ABX_SCHEMA/ka_data/reports/latest.md" reports/latest.md --overwrite
+          databricks fs cp "dbfs:/Volumes/$ABX_CATALOG/$ABX_SCHEMA/ka_data/reports/eval_summary.json" reports/eval_summary.json --overwrite
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abx-report
+          path: reports/
+
+      - name: Commit the refreshed report
+        if: always() && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/latest.md reports/eval_summary.json
+          git diff --cached --quiet && exit 0
+          git commit -m "chore(reports): refresh latest run [skip ci]"
+          git push

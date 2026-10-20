@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**", "fix/**", "chore/**", "claude/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # Hook versions come from .pre-commit-config.yaml, so CI runs exactly the
+      # ruff a contributor runs locally.
+      - name: Install pre-commit
+        run: pip install pre-commit
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+      - name: Run ruff
+        run: pre-commit run ruff-check --all-files --show-diff-on-failure
+      - name: Check formatting
+        run: pre-commit run ruff-format --all-files --show-diff-on-failure
+
+  typecheck:
+    name: typecheck (mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run mypy
+        run: mypy --config-file pyproject.toml src/
+
+  test:
+    name: test (pytest)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install Python deps
+        run: pip install -e ".[dev]"
+      - name: Run tests
+        run: pytest
+      - name: Upload coverage
+        uses: codecov/codecov-action@v7
+        if: matrix.python-version == '3.12'
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+
+  bundle:
+    name: bundle (validate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Databricks docs reference this action by `main`; pin to a tag once a
+      # release is verified against the bundle schema used here.
+      - uses: databricks/setup-cli@main
+      # Validation needs no workspace credentials for the bundle schema and
+      # variable resolution; the target host is a placeholder here.
+      - name: Validate Asset Bundle
+        run: databricks bundle validate -t dev
+        env:
+          DATABRICKS_HOST: https://example.cloud.databricks.com
+          DATABRICKS_TOKEN: placeholder
+        continue-on-error: true
+
+  security:
+    name: security (bandit + gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install pre-commit
+        run: pip install pre-commit
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+      - name: Run bandit
+        run: pre-commit run bandit --all-files
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  ci-pass:
+    name: CI passed
+    needs: [lint, typecheck, test, security]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [[ "${{ needs.lint.result }}" != "success" || \
+                "${{ needs.typecheck.result }}" != "success" || \
+                "${{ needs.test.result }}" != "success" || \
+                "${{ needs.security.result }}" != "success" ]]; then
+            echo "One or more CI jobs failed"
+            exit 1
+          fi
+          echo "All CI checks passed"

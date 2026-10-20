@@ -1,0 +1,50 @@
+# Databricks Asset Bundle for abx.
+#
+#   databricks bundle validate -t dev
+#   databricks bundle deploy   -t dev
+#   databricks bundle run setup_job -t dev
+#   databricks bundle run deploy_ka_job -t dev
+#   databricks bundle run eval_job -t dev        # exits non-zero when the gate fails
+#   databricks bundle run cost_job -t dev
+#
+# Every job runs the same `abx` CLI the README shows, as a serverless Python
+# wheel task. Variables map 1:1 to ABX_* settings in src/abx/config.py.
+
+bundle:
+  name: abx
+
+include:
+  - resources/*.yml
+
+artifacts:
+  abx_wheel:
+    type: whl
+    path: .
+    build: python -m build --wheel
+
+variables:
+  catalog:
+    description: Unity Catalog catalog for the schema, volume and eval dataset
+    default: main
+  schema:
+    description: Schema under the catalog
+    default: ab_demo
+  sql_warehouse_id:
+    description: SQL warehouse used by cost_job to read system tables (optional)
+    default: ""
+  experiment_path:
+    description: MLflow experiment that holds eval runs
+    default: /Shared/abx/handbook-ka
+
+targets:
+  dev:
+    mode: development
+    default: true
+
+  prod:
+    mode: production
+    workspace:
+      root_path: /Shared/.bundle/abx/prod
+    run_as:
+      # Replace with the service principal that owns the production assistant.
+      user_name: ${workspace.current_user.userName}

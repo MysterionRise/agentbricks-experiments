@@ -1,0 +1,114 @@
+# Four jobs, one per abx subcommand. Each is a serverless Python wheel task.
+#
+# The wheel is built by the bundle artifact in databricks.yml and installed into
+# the task environment together with databricks-agents, which the MLflow judges
+# need on Databricks.
+
+resources:
+  jobs:
+    setup_job:
+      name: "abx: setup (schema, volume, corpus)"
+      tasks:
+        - task_key: setup
+          environment_key: abx
+          python_wheel_task:
+            package_name: abx
+            entry_point: abx
+            parameters:
+              - "--set"
+              - "ABX_CATALOG=${var.catalog}"
+              - "--set"
+              - "ABX_SCHEMA=${var.schema}"
+              - "setup"
+              - "--corpus"
+              - "${workspace.file_path}/data/corpus"
+      environments:
+        - environment_key: abx
+          spec:
+            client: "2"
+            dependencies:
+              - ./dist/*.whl
+              - databricks-agents>=1.0
+
+    deploy_ka_job:
+      name: "abx: deploy Knowledge Assistant"
+      tasks:
+        - task_key: deploy
+          environment_key: abx
+          python_wheel_task:
+            package_name: abx
+            entry_point: abx
+            parameters:
+              - "--set"
+              - "ABX_CATALOG=${var.catalog}"
+              - "--set"
+              - "ABX_SCHEMA=${var.schema}"
+              - "deploy"
+      environments:
+        - environment_key: abx
+          spec:
+            client: "2"
+            dependencies:
+              - ./dist/*.whl
+              - databricks-agents>=1.0
+
+    eval_job:
+      name: "abx: eval gate"
+      # Weekly drift check in addition to on-demand runs; see docs/adr/0002.
+      schedule:
+        quartz_cron_expression: "0 0 6 ? * MON"
+        timezone_id: UTC
+        pause_status: PAUSED
+      tasks:
+        - task_key: eval
+          environment_key: abx
+          python_wheel_task:
+            package_name: abx
+            entry_point: abx
+            parameters:
+              - "--set"
+              - "ABX_CATALOG=${var.catalog}"
+              - "--set"
+              - "ABX_SCHEMA=${var.schema}"
+              - "--set"
+              - "ABX_EXPERIMENT_PATH=${var.experiment_path}"
+              - "eval"
+              - "--seed"
+              - "${workspace.file_path}/evals/seed.jsonl"
+              - "--pyproject"
+              - "${workspace.file_path}/pyproject.toml"
+              - "--out"
+              - "/tmp/abx-reports"
+      environments:
+        - environment_key: abx
+          spec:
+            client: "2"
+            dependencies:
+              - ./dist/*.whl
+              - databricks-agents>=1.0
+
+    cost_job:
+      name: "abx: cost report"
+      tasks:
+        - task_key: cost
+          environment_key: abx
+          python_wheel_task:
+            package_name: abx
+            entry_point: abx
+            parameters:
+              - "--set"
+              - "ABX_CATALOG=${var.catalog}"
+              - "--set"
+              - "ABX_SCHEMA=${var.schema}"
+              - "--set"
+              - "ABX_SQL_WAREHOUSE_ID=${var.sql_warehouse_id}"
+              - "cost"
+              - "--out"
+              - "/tmp/abx-reports"
+      environments:
+        - environment_key: abx
+          spec:
+            client: "2"
+            dependencies:
+              - ./dist/*.whl
+              - databricks-agents>=1.0

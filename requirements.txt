@@ -1,3 +1,7 @@
-databricks-sdk>=0.20,<2
-mlflow>=2.3
-requests>=2.31
+# Runtime dependencies are declared in pyproject.toml. This file exists for
+# `%pip install -r` convenience in notebooks and mirrors the main dependency set.
+databricks-sdk>=0.150.0
+mlflow>=3.4.0
+pydantic>=2.0
+pydantic-settings>=2.3.0
+pandas>=2.0

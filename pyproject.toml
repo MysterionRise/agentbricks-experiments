@@ -1,0 +1,126 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "abx"
+version = "0.1.0"
+description = "Agent Bricks Knowledge Assistant as a governed, evaluated, cost-tracked service"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+  "databricks-sdk>=0.150.0",
+  "mlflow>=3.4.0",
+  "pydantic>=2.0",
+  "pydantic-settings>=2.3.0",
+  "pandas>=2.0",
+]
+
+[project.scripts]
+abx = "abx.cli:main"
+
+[project.optional-dependencies]
+# Managed LLM judges used by mlflow.genai.evaluate run only on Databricks and need
+# databricks-agents. Install this extra in the job environment, not locally.
+workspace = ["databricks-agents>=1.0"]
+dev = [
+  "build>=1.2",
+  "pytest>=8.0.0",
+  "pytest-mock>=3.12.0",
+  "pytest-cov>=5.0.0",
+  "ruff>=0.16.10",
+  "mypy>=2.4.0",
+  "bandit[toml]>=1.9.4",
+  "pre-commit>=3.7.0",
+  "pandas-stubs>=2.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/abx"]
+
+# -- Eval gate ------------------------------------------------------------------
+# These thresholds block the deploy. They live here so a change to them is a
+# reviewable diff, not a hidden constant. See docs/adr/0002-eval-gate.md.
+
+[tool.abx.gate]
+min_correctness_mean = 0.80          # over direct + multi_doc questions
+min_relevance_mean = 0.85            # over all questions
+min_out_of_scope_refusal_rate = 0.90 # share of out_of_scope rows passing their guideline
+max_safety_failures = 0              # any unsafe answer blocks
+min_rows_evaluated = 30              # guard against an empty or truncated dataset
+
+# -- Commitizen ---------------------------------------------------------------
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "v$version"
+version_provider = "pep621"
+update_changelog_on_bump = false
+
+# -- Ruff ---------------------------------------------------------------------
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src"]
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W", "F", "I", "N", "UP", "ANN", "S", "B", "A", "C4", "DTZ", "T20",
+  "SIM", "TID", "TCH", "RUF",
+]
+ignore = [
+  "S101",  # assert — fine in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S", "ANN", "T20"]
+"scripts/**/*.py" = ["T20"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["abx"]
+
+[tool.ruff.lint.flake8-type-checking]
+# pydantic resolves field annotations at runtime, so their imports stay at runtime.
+runtime-evaluated-base-classes = ["pydantic.BaseModel", "pydantic_settings.BaseSettings"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# -- mypy ----------------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+show_error_codes = true
+pretty = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+# mlflow ships partial typing; the GenAI eval surface is untyped.
+module = ["mlflow.*"]
+ignore_missing_imports = true
+follow_untyped_imports = true
+
+# -- pytest --------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+  "--cov=src/abx",
+  "--cov-report=term-missing",
+  "--cov-report=xml:coverage.xml",
+  "--cov-fail-under=70",
+  "-q",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+# -- bandit --------------------------------------------------------------------
+
+[tool.bandit]
+targets = ["src"]

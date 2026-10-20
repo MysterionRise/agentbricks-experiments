@@ -1,54 +1,119 @@
-# Agent Bricks on Databricks — Minimal Demo
+# Agent Bricks, run like a product
 
-This repo gives you a tiny, data-safe starter to try two Agent Bricks use cases on your own Databricks workspace:
+A Databricks **Knowledge Assistant** taken from "it answers in the Playground" to
+"it is deployed from code, gated by an evaluation, and its cost is on a page".
+The agent itself is managed by Databricks. Everything that makes it safe to put in
+front of people is in this repository.
 
-1. **Knowledge Assistant** over UC Volume files (public-domain docs written by a notebook).
-2. **Custom LLM** using a toy labeled table.
+| Question a CTO gets asked | Where the answer lives |
+|---|---|
+| Can we rebuild it in a new workspace? | `databricks.yml`, `resources/jobs.yml`, `abx setup` / `abx deploy` |
+| How do we know it is good enough? | `evals/seed.jsonl`, `[tool.abx.gate]` in `pyproject.toml`, `abx eval` |
+| What does it cost per thousand questions? | `abx cost` over system tables, `reports/latest.md` |
+| Why Agent Bricks and not our own stack? | `docs/adr/0001-why-agent-bricks.md` |
+| What are we locked into? | `docs/adr/0004-portability.md` |
+| What would you tell the board? | `docs/cto-brief.md` |
 
-> **Note:** Agent Bricks is in Beta and features/regions may vary. Ensure your workspace meets the requirements (Unity Catalog, Serverless compute, access to foundation models via `system.ai`, serverless budget policy, and—specifically for Knowledge Assistant—files in a UC Volume or a Vector Search index that uses `databricks-gte-large-en`). See official docs.
+## How it fits together
 
-**AWS docs:** https://docs.databricks.com/aws/en/generative-ai/agent-bricks/
-**Knowledge Assistant:** https://docs.databricks.com/aws/en/generative-ai/agent-bricks/knowledge-assistant
-**Multi‑Agent Supervisor** (optional, later): https://docs.databricks.com/aws/en/generative-ai/agent-bricks/multi-agent-supervisor
+```mermaid
+flowchart LR
+    corpus[data/corpus/*.md] -->|abx setup| vol[(UC volume<br/>knowledge/)]
+    vol -->|abx deploy| ka[Knowledge Assistant<br/>serving endpoint]
+    seed[evals/seed.jsonl] -->|abx eval| ds[(UC eval dataset)]
+    ds --> judge[mlflow.genai.evaluate<br/>5 judges]
+    ka --> judge
+    judge --> gate{gate<br/>pyproject thresholds}
+    gate -->|pass / fail| report[reports/latest.md]
+    sys[(system tables)] -->|abx cost| report
+    ci[GitHub Actions<br/>eval.yml] -.->|weekly + on demand| judge
+```
 
-## What's inside
+One Python package, `abx`, with four commands. Each is also a serverless job in
+the Asset Bundle and a step in the notebook wrapper, so the CLI, the jobs and the
+notebook run identical code.
 
-- `notebooks/00_check_prereqs.py` – prints context and checks for embedding endpoint `databricks-gte-large-en`.
-- `notebooks/01_setup_catalog_schema_volume.py` – creates `catalog.schema.volume` (defaults: `main.ab_demo.ka_data`).
-- `notebooks/02_load_sample_docs_to_volume.py` – writes 3 markdown files into `/Volumes/<catalog>/<schema>/<volume>/knowledge`.
-- `notebooks/03_build_custom_llm_dataset.py` – creates `main.ab_demo.custom_llm_tiny` with `(request,response)` examples.
-- `notebooks/04_query_knowledge_assistant_example.py` – template to query your KA endpoint using MLflow Deployments.
+## Run it yourself
 
-## Quickstart (UI-first)
+Prerequisites: a workspace with Unity Catalog, serverless compute and Agent
+Bricks enabled; Databricks CLI ≥ 0.280 authenticated to it; Python 3.12+.
 
-1. Import or clone this repo into **Databricks Repos**.
-2. Open and run:
-   - `00_check_prereqs.py`
-   - `01_setup_catalog_schema_volume.py` (adjust widgets if you can't create in `main`)
-   - `02_load_sample_docs_to_volume.py`
-3. In the left nav, go to **Agents → Knowledge Assistant** and click **Create**.
-4. Add a **Knowledge source** of type **UC Files**.
-   - **Source:** the volume path printed by notebook 01 (ends with `/knowledge` from notebook 02).
-5. Finish creation. Initial build/sync can take time; you'll get a deployed endpoint when ready.
-6. Test in **AI Playground**. Click **Get code** there to copy the official Python snippet for querying the endpoint.
-7. (Optional) Open `04_query_knowledge_assistant_example.py`, set `ENDPOINT_NAME`, and run to test via MLflow Deployments.
+```bash
+pip install -e ".[dev]"
+abx validate                      # offline: seed schema, corpus, thresholds
+databricks bundle deploy -t dev   # uploads the wheel and the jobs
+databricks bundle run setup_job -t dev      # schema, volume, corpus
+databricks bundle run deploy_ka_job -t dev  # Knowledge Assistant → ACTIVE
+databricks bundle run eval_job -t dev       # exits 1 if the gate fails
+```
 
-## Optional: Custom LLM demo
+Or without the bundle, from a laptop with `DATABRICKS_HOST` and
+`DATABRICKS_TOKEN` set: `abx setup && abx deploy && abx eval && abx cost`.
+Set `ABX_CATALOG` and `ABX_SCHEMA` if you cannot write to `main.ab_demo`.
 
-1. Run `03_build_custom_llm_dataset.py` to create `main.ab_demo.custom_llm_tiny`.
-2. In **Agents → Custom LLM**, create a new agent:
-   - **Instructions:** e.g., _"Classify a support ticket into Billing, Shipping, or Tech."_
-   - **Datasets:** point to the created table, `request` as request column, `response` as response column.
-3. Let Agent Bricks optimize/evaluate and deploy the endpoint.
-4. Use Playground's **Get code** to query the Custom LLM endpoint from notebooks or apps.
+The eval job needs `databricks-agents` for the managed judges; the bundle
+installs it. `abx cost` needs `ABX_SQL_WAREHOUSE_ID`.
 
-## Local dev or Jobs (optional)
+## What the gate measures
 
-- `requirements.txt` lists the few libs you might pip‑install locally.
-- For CI/CD or Jobs via Asset Bundles, see Databricks docs on [Databricks Asset Bundles (DABs)](https://docs.databricks.com/en/dev-tools/bundles/index.html) and adjust as needed.
+The seed holds 39 questions over a fictional company handbook: 22 answerable
+from one document, 9 that need two documents, and 8 that the handbook does not
+cover. The corpus is invented on purpose so a model cannot answer from
+pre-training; a correct answer proves retrieval worked. The seed is never given
+to the assistant as examples.
 
-## Notes
+| Judge | Applies to | Threshold |
+|---|---|---|
+| Correctness (expected facts supported) | direct + multi_doc | mean ≥ 0.80 |
+| Relevance to query | all | mean ≥ 0.85 |
+| Expectations guidelines (must decline) | out_of_scope | ≥ 0.90 |
+| Safety | all | 0 failures |
+| Retrieval groundedness | direct + multi_doc | reported, not gated yet |
 
-- We only use public-domain snippets for sample docs.
-- If your workspace lacks permission to create catalogs/schemas/volumes in `main`, change the widgets in notebook 01.
-- Knowledge Assistant does not take UC tables as direct input (use files in volumes or a supported Vector Search index).
+Thresholds are in `pyproject.toml` under `[tool.abx.gate]`, so changing one is a
+reviewed diff. `docs/adr/0002-eval-gate.md` explains the choices.
+
+## Latest run
+
+`reports/latest.md` is regenerated by `abx eval` and `abx cost`, locally or by
+the `Eval gate` workflow. It shows a verdict, per-kind scores, the three worst
+rows with the judge's reason, and usage and list-price cost for the last 7 days.
+Until the first real run it says so instead of showing numbers.
+
+## Product status this repo relies on
+
+| Agent Bricks capability | Status | Checked |
+|---|---|---|
+| Knowledge Assistant | GA | 2026-10 |
+| Supervisor Agent (was Multi-Agent Supervisor) | GA | 2026-10 |
+| Information Extraction | Beta | 2026-10 |
+| Knowledge Assistant SDK (`w.knowledge_assistants`) | in `databricks-sdk` ≥ 0.150 | 2026-10 |
+
+`docs/status.md` keeps the dated log of what changed and what it broke.
+
+## Layout
+
+```
+src/abx/            config, corpus, ka (deploy), seed, gate, evaluate, cost, report, cli
+data/corpus/        13 handbook documents (fictional Halcyon Freight)
+evals/seed.jsonl    39 questions with expected facts or refusal guidelines
+databricks.yml      Asset Bundle; resources/jobs.yml holds the four jobs
+docs/adr/           decisions: why Agent Bricks, the gate, cost & governance, portability
+docs/cto-brief.md   one page for a non-engineer
+docs/runbook.md     deploy, roll back, rotate, what to do at 3 a.m.
+reports/latest.md   the last eval + cost run
+notebooks/run_abx.py  notebook wrapper around the same CLI
+tests/              unit tests; no workspace needed
+```
+
+## Roadmap
+
+- **Phase 1 (this)**: one Knowledge Assistant, deploy as code, eval gate, cost page.
+- **Phase 2**: a Supervisor Agent routing between this assistant, a Genie space over
+  a shipments table, and one MCP tool; routing correctness added to the gate.
+- **Phase 3**: Agent Learning from Human Feedback loop, dev → staging → prod bundle
+  targets with promotion on a green gate, weekly drift diff against `reports/`.
+
+## License
+
+MIT. The handbook corpus is fictional and carries no real company's policies.

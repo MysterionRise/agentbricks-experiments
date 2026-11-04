@@ -1,5 +1,11 @@
 # Agent Bricks, run like a product
 
+> **Status, 2026-11-04.** Databricks marked Knowledge Assistant and Supervisor Agent
+> as legacy on 2026-10-12: keep existing ones, build new agents with Genie Agents or
+> the Agent Bricks CLI. This repo keeps its Knowledge Assistant as the baseline and
+> migrates in Phase 2, judged by the same eval gate. No workspace run has been
+> published yet; `reports/latest.md` says so until one is.
+
 A Databricks **Knowledge Assistant** taken from "it answers in the Playground" to
 "it is deployed from code, gated by an evaluation, and its cost is on a page".
 The agent itself is managed by Databricks. Everything that makes it safe to put in
@@ -82,12 +88,13 @@ Until the first real run it says so instead of showing numbers.
 
 ## Product status this repo relies on
 
-| Agent Bricks capability | Status | Checked |
+| Capability | Status | Checked |
 |---|---|---|
-| Knowledge Assistant | GA | 2026-10 |
-| Supervisor Agent (was Multi-Agent Supervisor) | GA | 2026-10 |
-| Information Extraction | Beta | 2026-10 |
-| Knowledge Assistant SDK (`w.knowledge_assistants`) | in `databricks-sdk` ≥ 0.150 | 2026-10 |
+| Knowledge Assistant | Legacy since 2026-10-12 (existing assistants keep working) | 2026-11 |
+| Supervisor Agent (was Multi-Agent Supervisor) | Legacy since 2026-10-12; Supervisor API past end of life | 2026-11 |
+| Genie Agents (was Genie Spaces) | Recommended for new low-code agents | 2026-11 |
+| Agent Bricks CLI (`databricks-agentbricks`) | Beta; recommended for new code agents | 2026-11 |
+| Knowledge Assistant SDK (`w.knowledge_assistants`) | in `databricks-sdk` ≥ 0.154 | 2026-11 |
 
 `docs/status.md` keeps the dated log of what changed and what it broke.
 
@@ -108,11 +115,16 @@ tests/              unit tests; no workspace needed
 
 ## Roadmap
 
-- **Phase 1 (this)**: one Knowledge Assistant, deploy as code, eval gate, cost page.
-- **Phase 2**: a Supervisor Agent routing between this assistant, a Genie space over
-  a shipments table, and one MCP tool; routing correctness added to the gate.
-- **Phase 3**: Agent Learning from Human Feedback loop, dev → staging → prod bundle
-  targets with promotion on a green gate, weekly drift diff against `reports/`.
+Tracked as GitHub milestones and issues.
+
+- **Phase 1.1 (now)**: make the gate real. Fix what blocks an honest workspace run,
+  publish the first verdict, release v0.2.0.
+- **Phase 2**: migrate. Rebuild the handbook agent with the Agent Bricks CLI, using
+  retrieval plus a Genie Agent over a shipments table, and score it with the same
+  gate side by side with the legacy Knowledge Assistant; routing correctness gated.
+  ADR 0005 will record the decision.
+- **Phase 3**: dev → staging → prod promotion on a green gate, production scorers on
+  live traces, a reviewed feedback loop, and the gate run on a non-Databricks backend.
 
 ## License
 

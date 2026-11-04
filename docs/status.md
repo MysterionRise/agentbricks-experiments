@@ -34,6 +34,10 @@ Bricks moves quickly; a stale row here is a bug.
    column is empty in the MLflow run, the metric stays reported-only.
 3. The cost SQL column names match the workspace's system tables. The report
    says "unavailable" with the SQL error if not.
+4. After a sync, a knowledge source's `knowledge_cutoff_time` moves past the
+   newest file in the volume once indexing has finished. `abx deploy` waits for
+   that before returning. If deploys time out with sources already `UPDATED`, set
+   `ABX_DEPLOY_REQUIRE_FRESH_INDEX=false` and record what the field holds.
 
 ## Change log
 

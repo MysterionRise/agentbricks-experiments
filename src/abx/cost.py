@@ -35,18 +35,23 @@ SELECT
   COUNT(*)                                          AS requests,
   COALESCE(SUM(u.input_token_count), 0)             AS input_tokens,
   COALESCE(SUM(u.output_token_count), 0)            AS output_tokens,
-  SUM(CASE WHEN u.status_code <> 200 THEN 1 ELSE 0 END) AS failed_requests
+  COALESCE(SUM(CASE WHEN u.status_code <> 200 THEN 1 ELSE 0 END), 0) AS failed_requests
 FROM system.serving.endpoint_usage u
-JOIN system.serving.served_entities e
-  ON u.served_entity_id = e.served_entity_id
-WHERE e.endpoint_name = :endpoint_name
-  AND u.request_time >= CURRENT_TIMESTAMP() - INTERVAL :window_days DAYS
+-- served_entities keeps one row per config version, so a join would count each
+-- request once per version; filter on the set of ids instead.
+WHERE u.served_entity_id IN (
+    SELECT served_entity_id FROM system.serving.served_entities
+    WHERE endpoint_name = :endpoint_name
+  )
+  -- A parameter marker cannot sit inside an INTERVAL literal.
+  AND u.request_time >= CURRENT_TIMESTAMP() - make_dt_interval(:window_days)
 """
 
 BILLING_SQL = """
 SELECT
   COALESCE(SUM(b.usage_quantity), 0)                       AS dbu,
-  COALESCE(SUM(b.usage_quantity * p.pricing.default), 0)   AS usd_list
+  COALESCE(SUM(b.usage_quantity * p.pricing.default), 0)   AS usd_list,
+  COUNT(*)                                                 AS billing_rows
 FROM system.billing.usage b
 LEFT JOIN system.billing.list_prices p
   ON b.sku_name = p.sku_name
@@ -54,7 +59,7 @@ LEFT JOIN system.billing.list_prices p
  AND b.usage_start_time >= p.price_start_time
  AND (p.price_end_time IS NULL OR b.usage_start_time < p.price_end_time)
 WHERE b.usage_metadata.endpoint_name = :endpoint_name
-  AND b.usage_start_time >= CURRENT_TIMESTAMP() - INTERVAL :window_days DAYS
+  AND b.usage_start_time >= CURRENT_TIMESTAMP() - make_dt_interval(:window_days)
 """
 
 
@@ -126,7 +131,8 @@ def _run_query(
 
 
 def _int(value: object) -> int:
-    return int(str(value)) if value is not None else 0
+    # The Statement Execution API returns every value as a string, e.g. "12" or "12.0".
+    return int(float(str(value))) if value is not None else 0
 
 
 def _float(value: object) -> float:
@@ -153,8 +159,22 @@ def fetch_cost(w: WorkspaceClient, settings: Settings, endpoint_name: str) -> Co
         log.warning("cost query failed: %s", exc)
         return CostSummary(endpoint_name, settings.cost_window_days, available=False, note=str(exc))
 
-    requests, input_tokens, output_tokens, failed = [*usage, 0, 0, 0, 0][:4]
-    dbu, usd_list = [*billing, 0.0, 0.0][:2]
+    requests, input_tokens, output_tokens, failed = (usage + [None] * 4)[:4]
+    dbu, usd_list, billing_rows = (billing + [None] * 3)[:3]
+    # COUNT and COALESCE always return a row, so "nothing found" shows up as zero.
+    # Zero is not a measurement here: say why the number is missing instead.
+    gaps: list[str] = []
+    if _int(requests) == 0:
+        gaps.append(
+            f"no rows in system.serving.endpoint_usage for {endpoint_name} in the last "
+            f"{settings.cost_window_days} days (agent endpoints may not record usage; ADR 0003)"
+        )
+    if _int(billing_rows) == 0:
+        gaps.append(f"no billing rows attributed to {endpoint_name} in system.billing.usage")
+    if gaps:
+        return CostSummary(
+            endpoint_name, settings.cost_window_days, available=False, note="; ".join(gaps)
+        )
     return CostSummary(
         endpoint_name=endpoint_name,
         window_days=settings.cost_window_days,

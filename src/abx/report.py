@@ -153,6 +153,21 @@ def write_volume(
         w.files.upload(f"{volume_dir}/{SUMMARY_FILENAME}", io.BytesIO(payload), overwrite=True)
 
 
+def read_volume_summary(w: WorkspaceClient, volume_dir: str) -> EvalSummary | None:
+    """Load the summary a previous ``abx eval`` mirrored into the UC volume."""
+    from databricks.sdk.errors import NotFound
+
+    from abx.gate import EvalSummary
+
+    try:
+        response = w.files.download(f"{volume_dir}/{SUMMARY_FILENAME}")
+    except NotFound:
+        return None
+    if response.contents is None:
+        return None
+    return EvalSummary.from_dict(json.loads(response.contents.read().decode("utf-8")))
+
+
 def read_summary(out_dir: Path) -> EvalSummary | None:
     """Load a previously written summary so `abx cost` can keep the eval section."""
     from abx.gate import EvalSummary

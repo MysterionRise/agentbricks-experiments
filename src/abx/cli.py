@@ -156,7 +156,13 @@ def cmd_cost(args: argparse.Namespace, settings: Settings) -> int:
     from abx.cost import fetch_cost
     from abx.gate import GateThresholds, apply_gate
     from abx.ka import DeployError, resolve_endpoint_name
-    from abx.report import read_summary, render_report, write_local, write_volume
+    from abx.report import (
+        read_summary,
+        read_volume_summary,
+        render_report,
+        write_local,
+        write_volume,
+    )
 
     w = WorkspaceClient()
     try:
@@ -165,7 +171,10 @@ def cmd_cost(args: argparse.Namespace, settings: Settings) -> int:
         log.error("%s", exc)
         return 2
     cost = fetch_cost(w, settings, endpoint)
+    # In a job, --out is a fresh /tmp, so the last eval summary lives in the volume.
     summary = read_summary(args.out)
+    if summary is None and not args.no_volume:
+        summary = read_volume_summary(w, settings.reports_path)
     verdict = None
     if summary is not None:
         verdict = apply_gate(summary, GateThresholds.from_pyproject(args.pyproject))

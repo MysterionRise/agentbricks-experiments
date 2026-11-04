@@ -11,7 +11,7 @@ authenticated and `pip install -e .` has been run.
 | Volume | `main.ab_demo.ka_data` (`knowledge/`, `reports/`) | same |
 | Knowledge Assistant | display name `halcyon-handbook-ka` | same |
 | Serving endpoint | read from the assistant; `abx deploy` logs it | Databricks managed |
-| Eval dataset | `main.ab_demo.handbook_eval` | same |
+| Eval dataset | `main.ab_demo.handbook_eval_<seed hash>`, one per seed version | same |
 | MLflow experiment | `/Shared/abx/handbook-ka` | same |
 
 Override any of these with `ABX_*` variables or `abx --set ABX_KEY=VALUE`.

@@ -1,12 +1,15 @@
 """MLflow glue: the UC evaluation dataset, the scorers, and one evaluation run.
 
-Everything here needs a workspace. The pure parts (seed validation, the gate)
-are in ``seed.py`` and ``gate.py``.
+``run_evaluation`` is the workspace entry point. ``ensure_dataset`` and
+``evaluate_dataset`` hold the MLflow logic and also run offline against a local
+MLflow store, which is how ``tests/contract`` exercises them. The pure parts
+(seed validation, the gate) are in ``seed.py`` and ``gate.py``.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import mlflow
@@ -30,7 +33,7 @@ from abx.gate import (
     EvalSummary,
     summarize,
 )
-from abx.seed import SeedRecord, to_mlflow_records
+from abx.seed import SeedRecord, seed_hash, to_mlflow_records
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -39,6 +42,7 @@ if TYPE_CHECKING:
     from mlflow.genai.datasets import EvaluationDataset
 
     from abx.config import Settings
+    from abx.seed import RequestShape
 
 log = logging.getLogger(__name__)
 
@@ -51,23 +55,54 @@ def configure_tracking(settings: Settings) -> str:
     return str(experiment.experiment_id)
 
 
-def upsert_dataset(
-    settings: Settings, records: list[SeedRecord], experiment_id: str
-) -> EvaluationDataset:
-    """Create the UC-backed dataset on first use; merge the seed rows on every run.
+class DatasetMismatchError(RuntimeError):
+    """The evaluation dataset does not hold exactly the seed's rows."""
 
-    ``merge_records`` de-duplicates on inputs, so re-running with an unchanged seed
-    is a no-op and a changed seed produces a new dataset version with lineage.
+
+ExistsFn = Callable[[str], bool]
+
+
+def dataset_name(settings: Settings, records: list[SeedRecord]) -> str:
+    """One dataset per seed version: ``<catalog>.<schema>.<eval_dataset>_<hash>``.
+
+    MLflow datasets are upsert-only, so editing or removing a seed question would
+    leave a stale row behind in a single long-lived dataset. Naming the dataset
+    after the seed content makes each version immutable; the old one stays for
+    lineage of earlier runs.
     """
-    name = settings.eval_dataset_fqn
+    return f"{settings.eval_dataset_fqn}_{seed_hash(records, settings.request_shape)}"
+
+
+def ensure_dataset(
+    name: str,
+    records: list[SeedRecord],
+    request_shape: RequestShape,
+    experiment_id: str,
+    exists: ExistsFn,
+) -> EvaluationDataset:
+    """Get or create the dataset, merge the seed, and check it matches exactly.
+
+    Merging on every run is idempotent and repairs a dataset whose first write
+    was interrupted. ``exists`` is injected because how a missing dataset
+    surfaces differs between a workspace (a Unity Catalog table) and a local store.
+    """
     dataset: EvaluationDataset
-    try:
-        dataset = get_dataset(name=name)
+    if exists(name):
         log.info("dataset exists: %s", name)
-    except Exception:
+        dataset = get_dataset(name=name)
+    else:
         log.info("creating dataset %s", name)
         dataset = create_dataset(name=name, experiment_id=experiment_id)
-    dataset.merge_records(to_mlflow_records(records, settings.request_shape))
+    # On Databricks merge_records returns a new wrapper; locally it returns self.
+    merged: EvaluationDataset | None = dataset.merge_records(
+        to_mlflow_records(records, request_shape)
+    )
+    if merged is not None:
+        dataset = merged
+    count = len(dataset.to_df())
+    if count != len(records):
+        msg = f"dataset {name} has {count} rows, the seed has {len(records)}"
+        raise DatasetMismatchError(msg)
     return dataset
 
 
@@ -125,34 +160,56 @@ def build_scorers(judges: Mapping[str, Scorer] | None = None) -> list[Scorer]:
     ]
 
 
-def run_evaluation(
-    settings: Settings,
-    endpoint_name: str,
+def evaluate_dataset(
+    dataset: EvaluationDataset,
+    name: str,
     records: list[SeedRecord],
-    seed_path: Path | None = None,
+    predict_fn: Callable[..., Any],
+    scorers: list[Scorer],
+    run_name: str,
+    tags: Mapping[str, str],
 ) -> EvalSummary:
-    """Evaluate the endpoint against the dataset and summarise per kind."""
-    experiment_id = configure_tracking(settings)
-    dataset = upsert_dataset(settings, records, experiment_id)
-    predict_fn = mlflow.genai.to_predict_fn(f"endpoints:/{endpoint_name}")
-
-    with mlflow.start_run(run_name=f"eval-{endpoint_name}") as run:
-        mlflow.set_tags(
-            {
-                "abx.endpoint": endpoint_name,
-                "abx.dataset": settings.eval_dataset_fqn,
-                "abx.seed": str(seed_path) if seed_path else "evals/seed.jsonl",
-            }
-        )
-        result = mlflow.genai.evaluate(
-            data=dataset,
-            predict_fn=predict_fn,
-            scorers=build_scorers(),
-        )
+    """Run one MLflow evaluation of ``dataset`` and summarise it for the gate."""
+    with mlflow.start_run(run_name=run_name) as run:
+        mlflow.set_tags({**tags, "abx.dataset": name})
+        result = mlflow.genai.evaluate(data=dataset, predict_fn=predict_fn, scorers=scorers)
         run_id = str(getattr(result, "run_id", None) or run.info.run_id)
 
     result_df = getattr(result, "result_df", None)
     if result_df is None:
         msg = "mlflow.genai.evaluate returned no result_df; cannot gate"
         raise RuntimeError(msg)
-    return summarize(run_id, result_df, records, dataset_fqn=settings.eval_dataset_fqn)
+    return summarize(run_id, result_df, records, dataset_fqn=name)
+
+
+def run_evaluation(
+    settings: Settings,
+    endpoint_name: str,
+    records: list[SeedRecord],
+    seed_path: Path | None = None,
+    exists: ExistsFn | None = None,
+) -> EvalSummary:
+    """Evaluate the endpoint against this seed version's dataset in the workspace."""
+    if exists is None:
+        from databricks.sdk import WorkspaceClient
+
+        tables = WorkspaceClient().tables
+
+        def exists(full_name: str) -> bool:
+            return bool(tables.exists(full_name).table_exists)
+
+    experiment_id = configure_tracking(settings)
+    name = dataset_name(settings, records)
+    dataset = ensure_dataset(name, records, settings.request_shape, experiment_id, exists)
+    return evaluate_dataset(
+        dataset,
+        name,
+        records,
+        predict_fn=mlflow.genai.to_predict_fn(f"endpoints:/{endpoint_name}"),
+        scorers=build_scorers(),
+        run_name=f"eval-{endpoint_name}",
+        tags={
+            "abx.endpoint": endpoint_name,
+            "abx.seed": str(seed_path) if seed_path else "evals/seed.jsonl",
+        },
+    )

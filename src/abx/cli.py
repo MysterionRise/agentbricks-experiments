@@ -117,7 +117,7 @@ def cmd_eval(args: argparse.Namespace, settings: Settings) -> int:
     """Evaluate, gate, and write the report. Exit 1 when the gate fails."""
     from databricks.sdk import WorkspaceClient
 
-    from abx.evaluate import run_evaluation
+    from abx.evaluate import DatasetMismatchError, run_evaluation
     from abx.gate import GateThresholds, apply_gate
     from abx.ka import DeployError, resolve_endpoint_name
     from abx.report import render_report, write_local, write_volume
@@ -132,7 +132,11 @@ def cmd_eval(args: argparse.Namespace, settings: Settings) -> int:
         log.error("%s", exc)
         return 2
 
-    summary = run_evaluation(settings, endpoint, records, seed_path=args.seed)
+    try:
+        summary = run_evaluation(settings, endpoint, records, seed_path=args.seed)
+    except DatasetMismatchError as exc:
+        log.error("%s", exc)
+        return 2
     verdict = apply_gate(summary, thresholds)
     report = render_report(summary, verdict, None, endpoint, settings.eval_dataset_fqn)
     path = write_local(args.out, report, summary)

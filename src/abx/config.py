@@ -31,6 +31,7 @@ class Settings(BaseSettings):
         "plainly and do not guess."
     )
 
+    # Prefix only: abx eval appends an 8-character hash of the seed content.
     eval_dataset: str = "handbook_eval"
     experiment_path: str = "/Shared/abx/handbook-ka"
 

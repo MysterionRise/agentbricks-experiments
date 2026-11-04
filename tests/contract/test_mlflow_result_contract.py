@@ -159,3 +159,71 @@ def test_scoped_judges_skip_inapplicable_rows_and_fail_closed(local_mlflow, repo
     )
     reasons = apply_gate(summary, thresholds).reasons
     assert reasons == ["1 rows without a safety verdict (judge error)"]
+
+
+# --- The evaluation dataset (#10): a real local MLflow dataset ---
+
+
+def _local_exists(name: str) -> bool:
+    from mlflow.exceptions import MlflowException
+    from mlflow.genai.datasets import get_dataset
+
+    try:
+        get_dataset(name=name)
+    except MlflowException:
+        return False
+    return True
+
+
+def test_dataset_is_created_once_and_matches_the_seed(local_mlflow, repo_root):
+    from abx.evaluate import ensure_dataset
+
+    seed = [r for r in load_seed(repo_root / "evals" / "seed.jsonl") if r.id in SUBSET]
+    first = ensure_dataset("c.s.handbook_eval_test", seed, "responses", local_mlflow, _local_exists)
+    again = ensure_dataset("c.s.handbook_eval_test", seed, "responses", local_mlflow, _local_exists)
+    assert len(first.to_df()) == len(again.to_df()) == len(seed)
+
+
+def test_stale_rows_are_caught_not_evaluated(local_mlflow, repo_root):
+    from abx.evaluate import DatasetMismatchError, ensure_dataset
+
+    seed = [r for r in load_seed(repo_root / "evals" / "seed.jsonl") if r.id in SUBSET]
+    ensure_dataset("c.s.reused", seed, "responses", local_mlflow, _local_exists)
+    # A question removed from the seed would linger in an upsert-only dataset.
+    with pytest.raises(DatasetMismatchError, match="has 5 rows, the seed has 4"):
+        ensure_dataset("c.s.reused", seed[:4], "responses", local_mlflow, _local_exists)
+
+
+@scorer(name="relevance_to_query")
+def always_relevant(inputs):
+    return "yes"
+
+
+def test_full_path_from_dataset_to_gate_summary(local_mlflow, repo_root):
+    from abx.evaluate import build_scorers, ensure_dataset, evaluate_dataset
+
+    seed = [r for r in load_seed(repo_root / "evals" / "seed.jsonl") if r.id in SUBSET]
+    dataset = ensure_dataset("c.s.full_path", seed, "responses", local_mlflow, _local_exists)
+    judges = {
+        "correctness": strict_correctness,
+        "relevance_to_query": always_relevant,
+        "expectations_guidelines": strict_guidelines,
+        "safety": fake_safety,
+        "retrieval_groundedness": no_retriever,
+    }
+    summary = evaluate_dataset(
+        dataset,
+        "c.s.full_path",
+        seed,
+        predict_fn=stub_agent,
+        scorers=build_scorers(judges),
+        run_name="contract",
+        tags={"abx.endpoint": "stub"},
+    )
+    # Tags written into the managed dataset reach the result rows too.
+    assert summary.unknown_rows == 0 and summary.missing_ids == []
+    assert summary.dataset_fqn == "c.s.full_path"
+    assert summary.rows_by_kind == {"direct": 2, "multi_doc": 1, "out_of_scope": 2}
+    assert summary.correctness_mean == 1.0
+    assert summary.relevance_mean == 1.0
+    assert summary.out_of_scope_refusal_rate == 1.0

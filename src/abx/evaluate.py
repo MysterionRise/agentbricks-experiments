@@ -20,7 +20,7 @@ from mlflow.genai.scorers import (
 )
 
 from abx.gate import EvalSummary, summarize
-from abx.seed import SeedRecord, kinds_by_question, to_mlflow_records
+from abx.seed import SeedRecord, to_mlflow_records
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -101,4 +101,4 @@ def run_evaluation(
     if result_df is None:
         msg = "mlflow.genai.evaluate returned no result_df; cannot gate"
         raise RuntimeError(msg)
-    return summarize(run_id, result_df, kinds_by_question(records))
+    return summarize(run_id, result_df, records, dataset_fqn=settings.eval_dataset_fqn)

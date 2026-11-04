@@ -63,6 +63,16 @@ def test_duplicate_ids_rejected(tmp_path: Path):
         load_seed(path)
 
 
+def test_duplicate_questions_rejected(tmp_path: Path):
+    """MLflow de-duplicates dataset records on inputs, so a repeated question would vanish."""
+    a = {"id": "a", "kind": "direct", "question": "Same?", "expected_facts": ["f"]}
+    b = {"id": "b", "kind": "direct", "question": "Same?", "expected_facts": ["g"]}
+    path = tmp_path / "seed.jsonl"
+    path.write_text("\n".join([json.dumps(a), json.dumps(b)]))
+    with pytest.raises(ValueError, match="duplicate question"):
+        load_seed(path)
+
+
 def test_empty_seed_rejected(tmp_path: Path):
     path = tmp_path / "seed.jsonl"
     path.write_text("\n\n")

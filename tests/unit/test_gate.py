@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from abx.gate import EvalSummary, GateThresholds, RowVerdict, apply_gate, summarize
-from abx.seed import build_request
+from abx.seed import SeedRecord, build_request
 
 THRESHOLDS = GateThresholds(
     min_correctness_mean=0.8,
@@ -14,16 +14,41 @@ THRESHOLDS = GateThresholds(
     min_rows_evaluated=3,
 )
 
+SEED = [
+    SeedRecord(id="q1", kind="direct", question="Question one?", expected_facts=["a"]),
+    SeedRecord(
+        id="q2",
+        kind="multi_doc",
+        question="Question two?",
+        expected_facts=["b"],
+        source_docs=["x", "y"],
+    ),
+    SeedRecord(id="q3", kind="out_of_scope", question="Question three?", guidelines=["refuse"]),
+    SeedRecord(id="q4", kind="direct", question="Question four?", expected_facts=["c"]),
+]
+BY_ID = {r.id: r for r in SEED}
 
-def _row(question: str, **scores: object) -> dict[str, object]:
-    row: dict[str, object] = {"inputs": build_request(question, "responses"), "outputs": "x"}
+
+def _row(seed_id: str, *, tags: object = "default", state: str = "OK", **scores: object):
+    """One row shaped like MLflow 3.17's result_df (see tests/contract)."""
+    record = BY_ID.get(seed_id)
+    question = record.question if record else seed_id
+    row: dict[str, object] = {
+        "trace_id": f"tr-{seed_id}",
+        "request": build_request(question, "responses"),
+        "response": {"output": []},
+        "state": state,
+        "tags": {"seed_id": seed_id, "kind": record.kind if record else "direct", "mlflow.x": "y"}
+        if tags == "default"
+        else tags,
+        # MLflow logs dataset expectations as columns too; the gate must ignore them.
+        "expected_facts/value": ["a fact"],
+        "guidelines/value": None,
+    }
     for name, value in scores.items():
         row[f"{name}/value"] = value
         row[f"{name}/rationale"] = f"because {name}"
     return row
-
-
-KINDS = {"Q1": "direct", "Q2": "multi_doc", "Q3": "out_of_scope", "Q4": "direct"}
 
 
 def test_repo_thresholds_load(repo_root: Path):
@@ -43,43 +68,87 @@ def test_summarize_per_kind():
     df = pd.DataFrame(
         [
             _row(
-                "Q1",
+                "q1",
                 correctness="yes",
                 relevance_to_query="yes",
                 safety="yes",
                 retrieval_groundedness="yes",
             ),
             _row(
-                "Q2",
+                "q2",
                 correctness="no",
                 relevance_to_query="yes",
                 safety="yes",
                 retrieval_groundedness=True,
             ),
-            _row("Q3", expectations_guidelines="yes", relevance_to_query="no", safety="yes"),
-            _row("Q4", correctness=1, relevance_to_query="yes", safety="no"),
+            _row("q3", expectations_guidelines="yes", relevance_to_query="no", safety="yes"),
+            _row("q4", correctness=1, relevance_to_query="yes", safety="no"),
         ]
     )
-    s = summarize("run-1", df, KINDS)  # type: ignore[arg-type]
+    s = summarize("run-1", df, SEED, dataset_fqn="main.ab.ds")
     assert s.rows == 4
     assert s.rows_by_kind == {"direct": 2, "multi_doc": 1, "out_of_scope": 1}
+    assert s.missing_ids == [] and s.unknown_rows == 0 and s.errored_rows == 0
+    assert s.dataset_fqn == "main.ab.ds"
     assert s.correctness_mean == pytest.approx(2 / 3)
-    assert s.groundedness_mean == 1.0  # Q4 has no groundedness column value → skipped
-    assert s.relevance_mean == pytest.approx(3 / 4)
     assert s.out_of_scope_refusal_rate == 1.0
     assert s.safety_failures == 1
-    # Worst rows: Q2 (correctness) and Q3 (relevance) and Q4 (safety), each one failure.
-    assert {r.question for r in s.worst} == {"Q2", "Q3", "Q4"}
+    # expected_facts/value and guidelines/value are not judges.
+    for verdict in s.worst:
+        assert set(verdict.scores) <= {
+            "correctness",
+            "relevance_to_query",
+            "expectations_guidelines",
+            "safety",
+            "retrieval_groundedness",
+        }
+    assert {r.question for r in s.worst} == {"Question two?", "Question three?", "Question four?"}
     assert all(r.rationale.startswith("because") for r in s.worst)
 
 
-def test_summarize_unknown_question_and_nan():
-    df = pd.DataFrame([_row("Unknown?", correctness=float("nan"), safety=None)])
-    s = summarize("r", df, {})
+def test_kind_comes_from_tags_not_from_an_inputs_column():
+    """Regression: MLflow 3.17 has no `inputs` column; the gate read it and saw nothing."""
+    df = pd.DataFrame([_row("q1", correctness="yes", safety="yes")])
+    assert "inputs" not in df.columns
+    s = summarize("r", df, SEED)
+    assert s.rows_by_kind == {"direct": 1}
+    assert s.unknown_rows == 0
+
+
+def test_falls_back_to_the_question_when_tags_are_missing():
+    df = pd.DataFrame([_row("q3", tags={}, expectations_guidelines="yes", safety="yes")])
+    s = summarize("r", df, SEED)
+    assert s.rows_by_kind == {"out_of_scope": 1}
+
+
+def test_tags_as_json_string_are_accepted():
+    df = pd.DataFrame([_row("q1", tags='{"seed_id": "q1", "kind": "direct"}', safety="yes")])
+    assert summarize("r", df, SEED).rows_by_kind == {"direct": 1}
+
+
+def test_kind_mismatch_between_tags_and_seed_is_unknown():
+    df = pd.DataFrame([_row("q1", tags={"seed_id": "q1", "kind": "out_of_scope"}, safety="yes")])
+    s = summarize("r", df, SEED)
+    assert s.unknown_rows == 1
+    assert any("could not be matched" in r for r in apply_gate(s, THRESHOLDS).reasons)
+
+
+def test_unknown_rows_and_missing_seed_ids_fail_the_gate():
+    df = pd.DataFrame([_row("Unknown?", tags={}, correctness=float("nan"), safety=None)])
+    s = summarize("r", df, SEED)
     assert s.rows_by_kind == {"unknown": 1}
-    assert s.correctness_mean is None
-    assert s.safety_failures == 0
-    assert s.worst == []
+    assert s.unknown_rows == 1
+    assert s.missing_ids == ["q1", "q2", "q3", "q4"]
+    reasons = "\n".join(apply_gate(s, THRESHOLDS).reasons)
+    assert "4 seed rows missing from results: q1, q2, q3, q4" in reasons
+    assert "1 result rows could not be matched" in reasons
+
+
+def test_errored_traces_fail_the_gate():
+    df = pd.DataFrame([_row("q1", state="ERROR", correctness="yes", safety="yes")])
+    s = summarize("r", df, SEED)
+    assert s.errored_rows == 1
+    assert any("ended in ERROR" in r for r in apply_gate(s, THRESHOLDS).reasons)
 
 
 def test_gate_passes():
@@ -111,6 +180,25 @@ def test_summary_round_trip():
         None,
         0,
         worst=[RowVerdict("Q", "direct", {"correctness": False}, "why")],
+        dataset_fqn="c.s.d",
+        missing_ids=["x"],
+        unknown_rows=1,
+        errored_rows=2,
     )
-    back = EvalSummary.from_dict(s.as_dict())
-    assert back == s
+    assert EvalSummary.from_dict(s.as_dict()) == s
+
+
+def test_summary_reads_json_written_before_the_new_fields():
+    old = {
+        "run_id": "r",
+        "rows": 1,
+        "rows_by_kind": {},
+        "correctness_mean": None,
+        "relevance_mean": None,
+        "groundedness_mean": None,
+        "out_of_scope_refusal_rate": None,
+        "safety_failures": 0,
+        "worst": [],
+    }
+    s = EvalSummary.from_dict(old)
+    assert s.missing_ids == [] and s.unknown_rows == 0 and s.dataset_fqn == ""

@@ -52,9 +52,14 @@ class SeedRecord(BaseModel):
 
 
 def load_seed(path: Path) -> list[SeedRecord]:
-    """Read and validate the JSONL seed. Ids must be unique."""
+    """Read and validate the JSONL seed. Ids and questions must be unique.
+
+    Questions must be unique because the MLflow dataset de-duplicates records on
+    their inputs: two rows with one question would silently collapse into one.
+    """
     records: list[SeedRecord] = []
     seen: set[str] = set()
+    questions: set[str] = set()
     for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not raw.strip():
             continue
@@ -66,7 +71,11 @@ def load_seed(path: Path) -> list[SeedRecord]:
         if record.id in seen:
             msg = f"{path}:{line_no}: duplicate id {record.id!r}"
             raise ValueError(msg)
+        if record.question in questions:
+            msg = f"{path}:{line_no}: duplicate question in {record.id!r}"
+            raise ValueError(msg)
         seen.add(record.id)
+        questions.add(record.question)
         records.append(record)
     if not records:
         msg = f"{path}: seed is empty"

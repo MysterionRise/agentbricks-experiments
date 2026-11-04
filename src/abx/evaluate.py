@@ -17,12 +17,23 @@ from mlflow.genai.scorers import (
     RelevanceToQuery,
     RetrievalGroundedness,
     Safety,
+    Scorer,
+    scorer,
 )
 
-from abx.gate import EvalSummary, summarize
+from abx.gate import (
+    CORRECTNESS,
+    GROUNDEDNESS,
+    GUIDELINES,
+    RELEVANCE,
+    SAFETY,
+    EvalSummary,
+    summarize,
+)
 from abx.seed import SeedRecord, to_mlflow_records
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from mlflow.genai.datasets import EvaluationDataset
@@ -60,14 +71,57 @@ def upsert_dataset(
     return dataset
 
 
-def build_scorers() -> list[Any]:
-    """The judge set. Each maps to one column the gate reads."""
+def scoped(inner: Scorer, needs: str) -> Scorer:
+    """Run ``inner`` only on rows whose expectations carry ``needs``.
+
+    Built-in judges raise on rows they do not apply to (Correctness without
+    ``expected_facts``, ExpectationsGuidelines without ``guidelines``), which logs
+    a judge error on every such row. Returning None instead records no verdict
+    for that row, and the gate scopes each judge to the kinds it applies to. The
+    wrapper keeps the inner judge's name, so its column is unchanged. The
+    Databricks harness passes expectations under the same keys.
+    """
+
+    def judge(
+        inputs: dict[str, Any] | None,
+        outputs: object,
+        expectations: dict[str, Any] | None,
+        trace: object,
+    ) -> object:
+        if not (expectations or {}).get(needs):
+            return None
+        # Scorer.run filters these to the inner judge's own signature.
+        return inner.run(  # type: ignore[no-untyped-call]
+            inputs=inputs, outputs=outputs, expectations=expectations, trace=trace
+        )
+
+    return scorer(judge, name=inner.name)
+
+
+def default_judges() -> dict[str, Scorer]:
+    """MLflow's built-in judges, keyed by the result column each one writes."""
+    return {
+        CORRECTNESS: Correctness(),
+        RELEVANCE: RelevanceToQuery(),
+        GUIDELINES: ExpectationsGuidelines(),
+        SAFETY: Safety(),  # type: ignore[no-untyped-call]
+        GROUNDEDNESS: RetrievalGroundedness(),
+    }
+
+
+def build_scorers(judges: Mapping[str, Scorer] | None = None) -> list[Scorer]:
+    """The judge set, each scoped to the rows it applies to.
+
+    ``judges`` replaces the built-in judges, keyed like :func:`default_judges`;
+    the contract test passes deterministic ones.
+    """
+    j = dict(judges) if judges is not None else default_judges()
     return [
-        Correctness(),
-        RelevanceToQuery(),
-        RetrievalGroundedness(),
-        ExpectationsGuidelines(),
-        Safety(),  # type: ignore[no-untyped-call]
+        scoped(j[CORRECTNESS], "expected_facts"),
+        scoped(j[RELEVANCE], "expected_facts"),
+        scoped(j[GUIDELINES], "guidelines"),
+        j[SAFETY],
+        j[GROUNDEDNESS],
     ]
 
 

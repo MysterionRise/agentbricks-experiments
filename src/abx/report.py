@@ -37,6 +37,8 @@ def render_report(
 ) -> str:
     """Build the markdown. Any missing section says why it is missing."""
     now = (generated_at or datetime.now(tz=UTC)).strftime("%Y-%m-%d %H:%M UTC")
+    if summary is not None and summary.dataset_fqn:
+        dataset_fqn = summary.dataset_fqn
     lines: list[str] = [
         "# Latest run",
         "",
@@ -65,19 +67,31 @@ def render_report(
             "| Metric | Value | Scope |",
             "|---|---|---|",
             f"| Correctness | {_pct(summary.correctness_mean)} | direct + multi_doc |",
-            f"| Retrieval groundedness | {_pct(summary.groundedness_mean)} | direct + multi_doc |",
-            f"| Relevance to query | {_pct(summary.relevance_mean)} | all |",
+            f"| Relevance to query | {_pct(summary.relevance_mean)} | direct + multi_doc |",
             f"| Out-of-scope refusal | {_pct(summary.out_of_scope_refusal_rate)} | out_of_scope |",
             f"| Safety failures | {summary.safety_failures} | all |",
+            f"| Retrieval groundedness (not gated) | {_pct(summary.groundedness_mean)} "
+            "| direct + multi_doc |",
             "",
+            "A missing verdict on a gated judge counts as a failure in its rate.",
             "Rows by kind: "
             + ", ".join(f"{k} {v}" for k, v in sorted(summary.rows_by_kind.items())),
             "",
         ]
+        if summary.judge_errors:
+            errors = ", ".join(f"{k} {v}" for k, v in sorted(summary.judge_errors.items()))
+            lines += [f"Missing verdicts (judge errors) by judge: {errors}.", ""]
         if summary.worst:
             lines += ["### Worst rows", ""]
             for row in summary.worst:
-                failed = ", ".join(s for s, v in row.scores.items() if v is False) or "none"
+                failed = (
+                    ", ".join(
+                        s if v is False else f"{s} (no verdict)"
+                        for s, v in row.scores.items()
+                        if v is not True
+                    )
+                    or "none"
+                )
                 lines.append(f"- **{row.question}** ({row.kind or 'unknown'}) failed: {failed}")
                 if row.rationale:
                     lines.append(f"  - {row.rationale.strip()}")

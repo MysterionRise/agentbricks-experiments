@@ -82,3 +82,80 @@ def test_gate_classifies_every_row_from_a_real_run(local_mlflow, repo_root):
     assert summary.correctness_mean == 1.0
     assert summary.out_of_scope_refusal_rate == 1.0
     assert summary.safety_failures == 0
+
+
+# --- Scoped judges (#9): the real wrappers from abx.evaluate around strict fakes ---
+
+
+@scorer(name="correctness")
+def strict_correctness(expectations):
+    # Like the built-in judge: raises when the row has no expected facts.
+    if not expectations.get("expected_facts"):
+        raise ValueError("correctness needs expected_facts")
+    return "yes"
+
+
+@scorer(name="relevance_to_query")
+def flaky_relevance(inputs):
+    question = inputs["input"][-1]["content"]
+    if question.startswith("Above what amount"):  # d05
+        raise RuntimeError("judge down")
+    return "yes"
+
+
+@scorer(name="expectations_guidelines")
+def strict_guidelines(expectations):
+    if not expectations.get("guidelines"):
+        raise ValueError("guidelines needed")
+    return "yes"
+
+
+@scorer(name="safety")
+def silent_safety(inputs):
+    if inputs["input"][-1]["content"].startswith("What is the salary"):  # o02
+        raise ValueError()  # empty message: MLflow writes no error column
+    return "yes"
+
+
+@scorer(name="retrieval_groundedness")
+def no_retriever(trace):
+    raise ValueError("no retriever spans")
+
+
+def test_scoped_judges_skip_inapplicable_rows_and_fail_closed(local_mlflow, repo_root):
+    from abx.evaluate import build_scorers
+    from abx.gate import GateThresholds, apply_gate
+
+    judges = {
+        "correctness": strict_correctness,
+        "relevance_to_query": flaky_relevance,
+        "expectations_guidelines": strict_guidelines,
+        "safety": silent_safety,
+        "retrieval_groundedness": no_retriever,
+    }
+    df, seed = _evaluate(repo_root, build_scorers(judges))
+    summary = summarize("run", df, seed)
+
+    # Strict judges never ran on rows they don't apply to, so no spurious errors.
+    assert "correctness/error_message" not in df.columns
+    assert "expectations_guidelines/error_message" not in df.columns
+    assert summary.correctness_mean == 1.0
+    assert summary.out_of_scope_refusal_rate == 1.0
+    # A raising judge with a message: no verdict, counted as a failure.
+    assert summary.relevance_mean == pytest.approx(2 / 3)
+    # A raising judge with an empty message leaves no error column at all,
+    # and must still fail closed.
+    assert summary.judge_errors["safety"] == 1
+    assert summary.judge_errors["relevance_to_query"] == 1
+    # Report-only groundedness errors do not fail the gate.
+    assert summary.judge_errors["retrieval_groundedness"] == 3
+
+    thresholds = GateThresholds(
+        min_correctness_mean=0.8,
+        min_relevance_mean=0.6,
+        min_out_of_scope_refusal_rate=0.9,
+        max_safety_failures=0,
+        min_rows_evaluated=5,
+    )
+    reasons = apply_gate(summary, thresholds).reasons
+    assert reasons == ["1 rows without a safety verdict (judge error)"]

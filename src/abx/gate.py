@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from abx.seed import ANSWERABLE, Kind, SeedRecord, question_from_inputs
+from abx.seed import ANSWERABLE, KINDS, Kind, SeedRecord, question_from_inputs
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,6 +34,21 @@ GROUNDEDNESS = "retrieval_groundedness"
 # dataset expectations as ``expected_facts/value`` and ``guidelines/value``;
 # those are inputs to the judges, not verdicts.
 SCORERS: tuple[str, ...] = (CORRECTNESS, RELEVANCE, GUIDELINES, SAFETY, GROUNDEDNESS)
+
+# Which kinds of question each judge applies to. A correct refusal is not
+# "relevant" to the question it declines, so relevance is scoped to answerable
+# rows; see the 2026-11-04 amendment to ADR 0002.
+APPLIES: dict[str, frozenset[str]] = {
+    CORRECTNESS: frozenset(ANSWERABLE),
+    RELEVANCE: frozenset(ANSWERABLE),
+    GROUNDEDNESS: frozenset(ANSWERABLE),
+    GUIDELINES: frozenset({"out_of_scope"}),
+    SAFETY: frozenset(KINDS),
+}
+
+# Judges whose missing verdict counts as a failure. Groundedness is reported
+# only, because a trace may carry no retriever spans for it to read.
+GATED: frozenset[str] = frozenset({CORRECTNESS, RELEVANCE, GUIDELINES, SAFETY})
 
 
 class GateThresholds(BaseModel):
@@ -75,6 +90,10 @@ class EvalSummary:
     ``missing_ids`` are seed rows with no result row (a lost trace drops a row
     silently). ``unknown_rows`` could not be matched to the seed. ``errored_rows``
     are rows whose trace ended in ERROR. Each of them fails the gate.
+
+    Rates are over the rows each judge applies to. For gated judges a missing
+    verdict (judge error, timeout, absent column) counts as a failure and is also
+    counted in ``judge_errors``, so an outage cannot pass the gate on a few rows.
     """
 
     run_id: str
@@ -90,6 +109,7 @@ class EvalSummary:
     missing_ids: list[str] = field(default_factory=list)
     unknown_rows: int = 0
     errored_rows: int = 0
+    judge_errors: Mapping[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         """JSON-friendly form, written next to the report so `abx cost` can reuse it."""
@@ -106,6 +126,7 @@ class EvalSummary:
             "missing_ids": list(self.missing_ids),
             "unknown_rows": self.unknown_rows,
             "errored_rows": self.errored_rows,
+            "judge_errors": dict(self.judge_errors),
             "worst": [
                 {
                     "question": r.question,
@@ -143,6 +164,7 @@ class EvalSummary:
             missing_ids=list(data.get("missing_ids", [])),
             unknown_rows=int(data.get("unknown_rows", 0)),
             errored_rows=int(data.get("errored_rows", 0)),
+            judge_errors={str(k): int(v) for k, v in data.get("judge_errors", {}).items()},
         )
 
 
@@ -170,7 +192,15 @@ def _as_pass(value: object) -> bool | None:
     return text in PASS_VALUES
 
 
-def _rate(values: list[bool | None]) -> float | None:
+def _strict_rate(values: list[bool | None]) -> float | None:
+    """Share of passes over every applicable row; a missing verdict is a failure."""
+    if not values:
+        return None
+    return sum(1 for v in values if v is True) / len(values)
+
+
+def _known_rate(values: list[bool | None]) -> float | None:
+    """Share of passes over rows with a verdict; for report-only judges."""
     known = [v for v in values if v is not None]
     if not known:
         return None
@@ -225,12 +255,14 @@ def _is_errored(row: pd.Series[Any]) -> bool:
     return str(getattr(state, "value", state)).upper() == "ERROR"
 
 
-def _rationale(df_row: pd.Series[Any], scorer: str) -> str:
-    for suffix in ("/rationale", "/reason"):
+def _rationale(df_row: pd.Series[Any], scorer: str, *, missing: bool = False) -> str:
+    """The judge's explanation; for a missing verdict, its error message first."""
+    order = ("/error_message", "/rationale") if missing else ("/rationale", "/reason")
+    for suffix in order:
         key = f"{scorer}{suffix}"
         if key in df_row.index:
             value = df_row[key]
-            if isinstance(value, str):
+            if isinstance(value, str) and value.strip():
                 return value
     return ""
 
@@ -250,10 +282,8 @@ def summarize(
     rows_by_kind: dict[str, int] = {}
     unknown_rows = 0
     errored_rows = 0
-    correctness: list[bool | None] = []
-    relevance: list[bool | None] = []
-    groundedness: list[bool | None] = []
-    refusals: list[bool | None] = []
+    by_judge: dict[str, list[bool | None]] = {name: [] for name in SCORERS}
+    judge_errors: dict[str, int] = {}
     safety_failures = 0
     verdicts: list[tuple[int, RowVerdict]] = []
 
@@ -268,18 +298,23 @@ def summarize(
             errored_rows += 1
         rows_by_kind[kind or "unknown"] = rows_by_kind.get(kind or "unknown", 0) + 1
 
-        scores = {scorer: _as_pass(row[col]) for scorer, col in columns.items() if col in row.index}
-        if kind in ANSWERABLE:
-            correctness.append(scores.get(CORRECTNESS))
-            groundedness.append(scores.get(GROUNDEDNESS))
-        if kind == "out_of_scope":
-            refusals.append(scores.get(GUIDELINES))
-        relevance.append(scores.get(RELEVANCE))
-        if scores.get(SAFETY) is False:
-            safety_failures += 1
+        # Only judges that apply to this row's kind; an unknown row already fails.
+        scores: dict[str, bool | None] = {}
+        if kind is not None:
+            for name in SCORERS:
+                if kind not in APPLIES[name]:
+                    continue
+                col = columns.get(name)
+                value = _as_pass(row[col]) if col is not None else None
+                scores[name] = value
+                by_judge[name].append(value)
+                if value is None:
+                    judge_errors[name] = judge_errors.get(name, 0) + 1
+            if scores.get(SAFETY) is False:
+                safety_failures += 1
 
-        failed = [s for s, v in scores.items() if v is False]
-        rationale = _rationale(row, failed[0]) if failed else ""
+        failed = [s for s, v in scores.items() if v is False or (v is None and s in GATED)]
+        rationale = _rationale(row, failed[0], missing=scores[failed[0]] is None) if failed else ""
         verdicts.append(
             (len(failed), RowVerdict(question or "?", kind, scores, rationale)),
         )
@@ -291,16 +326,17 @@ def summarize(
         run_id=run_id,
         rows=len(result_df),
         rows_by_kind=rows_by_kind,
-        correctness_mean=_rate(correctness),
-        relevance_mean=_rate(relevance),
-        groundedness_mean=_rate(groundedness),
-        out_of_scope_refusal_rate=_rate(refusals),
+        correctness_mean=_strict_rate(by_judge[CORRECTNESS]),
+        relevance_mean=_strict_rate(by_judge[RELEVANCE]),
+        groundedness_mean=_known_rate(by_judge[GROUNDEDNESS]),
+        out_of_scope_refusal_rate=_strict_rate(by_judge[GUIDELINES]),
         safety_failures=safety_failures,
         worst=worst,
         dataset_fqn=dataset_fqn,
         missing_ids=sorted(set(by_id) - seen_ids),
         unknown_rows=unknown_rows,
         errored_rows=errored_rows,
+        judge_errors=judge_errors,
     )
 
 
@@ -338,5 +374,9 @@ def apply_gate(summary: EvalSummary, thresholds: GateThresholds) -> GateVerdict:
         reasons.append(
             f"{summary.safety_failures} safety failures (max {thresholds.max_safety_failures})"
         )
+    # A missing safety verdict is not a pass: the answer was never checked.
+    unverified = summary.judge_errors.get(SAFETY, 0)
+    if unverified:
+        reasons.append(f"{unverified} rows without a safety verdict (judge error)")
 
     return GateVerdict(passed=not reasons, reasons=reasons)

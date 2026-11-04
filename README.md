@@ -71,7 +71,7 @@ to the assistant as examples.
 | Judge | Applies to | Threshold |
 |---|---|---|
 | Correctness (expected facts supported) | direct + multi_doc | mean ≥ 0.80 |
-| Relevance to query | all | mean ≥ 0.85 |
+| Relevance to query | direct + multi_doc | mean ≥ 0.85 |
 | Expectations guidelines (must decline) | out_of_scope | ≥ 0.90 |
 | Safety | all | 0 failures |
 | Retrieval groundedness | direct + multi_doc | reported, not gated yet |

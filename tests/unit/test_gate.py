@@ -91,6 +91,11 @@ def test_summarize_per_kind():
     assert s.missing_ids == [] and s.unknown_rows == 0 and s.errored_rows == 0
     assert s.dataset_fqn == "main.ab.ds"
     assert s.correctness_mean == pytest.approx(2 / 3)
+    # Relevance is scoped to answerable rows: q3's "no" on a refusal is ignored.
+    assert s.relevance_mean == 1.0
+    # Groundedness is report-only: q4's missing verdict is skipped, not failed.
+    assert s.groundedness_mean == 1.0
+    assert s.judge_errors == {"retrieval_groundedness": 1}
     assert s.out_of_scope_refusal_rate == 1.0
     assert s.safety_failures == 1
     # expected_facts/value and guidelines/value are not judges.
@@ -102,7 +107,7 @@ def test_summarize_per_kind():
             "safety",
             "retrieval_groundedness",
         }
-    assert {r.question for r in s.worst} == {"Question two?", "Question three?", "Question four?"}
+    assert {r.question for r in s.worst} == {"Question two?", "Question four?"}
     assert all(r.rationale.startswith("because") for r in s.worst)
 
 
@@ -151,6 +156,56 @@ def test_errored_traces_fail_the_gate():
     assert any("ended in ERROR" in r for r in apply_gate(s, THRESHOLDS).reasons)
 
 
+def test_missing_gated_verdict_counts_as_failure():
+    """Fail closed: a judge error must not shrink the denominator (ADR 0002)."""
+    df = pd.DataFrame(
+        [
+            _row("q1", correctness="yes", relevance_to_query="yes", safety="yes"),
+            _row("q4", correctness=float("nan"), relevance_to_query="yes", safety="yes"),
+        ]
+    )
+    df.loc[1, "correctness/error_message"] = "judge timed out"
+    s = summarize("r", df, SEED)
+    assert s.correctness_mean == 0.5
+    assert s.judge_errors["correctness"] == 1
+    worst = {w.question: w for w in s.worst}
+    assert worst["Question four?"].scores["correctness"] is None
+    assert worst["Question four?"].rationale == "judge timed out"
+
+
+def test_absent_judge_column_fails_every_applicable_row():
+    df = pd.DataFrame([_row("q1", safety="yes"), _row("q4", safety="yes")])
+    s = summarize("r", df, SEED)
+    assert s.correctness_mean == 0.0
+    assert s.judge_errors["correctness"] == 2
+
+
+def test_missing_safety_verdict_fails_the_gate():
+    df = pd.DataFrame([_row("q1", correctness="yes", relevance_to_query="yes", safety=None)])
+    s = summarize("r", df, SEED)
+    assert s.safety_failures == 0
+    reasons = apply_gate(s, THRESHOLDS).reasons
+    assert any("1 rows without a safety verdict" in r for r in reasons)
+
+
+def test_judges_ignore_rows_they_do_not_apply_to():
+    df = pd.DataFrame(
+        [
+            _row(
+                "q3",
+                expectations_guidelines="yes",
+                correctness="no",
+                relevance_to_query="no",
+                safety="yes",
+            )
+        ]
+    )
+    s = summarize("r", df, SEED)
+    assert s.correctness_mean is None and s.relevance_mean is None
+    assert s.out_of_scope_refusal_rate == 1.0
+    assert s.worst == []
+
+
 def test_gate_passes():
     s = EvalSummary("r", 40, {}, 0.9, 0.95, 0.9, 1.0, 0)
     v = apply_gate(s, THRESHOLDS)
@@ -184,6 +239,7 @@ def test_summary_round_trip():
         missing_ids=["x"],
         unknown_rows=1,
         errored_rows=2,
+        judge_errors={"safety": 1},
     )
     assert EvalSummary.from_dict(s.as_dict()) == s
 

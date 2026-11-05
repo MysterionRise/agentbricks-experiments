@@ -31,6 +31,7 @@ class Settings(BaseSettings):
         "plainly and do not guess."
     )
 
+    # Prefix only: abx eval appends an 8-character hash of the seed content.
     eval_dataset: str = "handbook_eval"
     experiment_path: str = "/Shared/abx/handbook-ka"
 
@@ -48,6 +49,10 @@ class Settings(BaseSettings):
     # Deploy polling
     deploy_timeout_s: int = 1800
     deploy_poll_s: int = 20
+    # Require each knowledge source's cutoff to be no older than the newest file.
+    # Unverified on a workspace yet (docs/status.md); set false if the platform
+    # leaves knowledge_cutoff_time unset and deploys time out.
+    deploy_require_fresh_index: bool = True
 
     @property
     def schema_fqn(self) -> str:

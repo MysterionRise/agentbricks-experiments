@@ -7,6 +7,7 @@ is never fed to the assistant as examples: it is a held-out test set.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -52,9 +53,14 @@ class SeedRecord(BaseModel):
 
 
 def load_seed(path: Path) -> list[SeedRecord]:
-    """Read and validate the JSONL seed. Ids must be unique."""
+    """Read and validate the JSONL seed. Ids and questions must be unique.
+
+    Questions must be unique because the MLflow dataset de-duplicates records on
+    their inputs: two rows with one question would silently collapse into one.
+    """
     records: list[SeedRecord] = []
     seen: set[str] = set()
+    questions: set[str] = set()
     for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not raw.strip():
             continue
@@ -66,7 +72,11 @@ def load_seed(path: Path) -> list[SeedRecord]:
         if record.id in seen:
             msg = f"{path}:{line_no}: duplicate id {record.id!r}"
             raise ValueError(msg)
+        if record.question in questions:
+            msg = f"{path}:{line_no}: duplicate question in {record.id!r}"
+            raise ValueError(msg)
         seen.add(record.id)
+        questions.add(record.question)
         records.append(record)
     if not records:
         msg = f"{path}: seed is empty"
@@ -116,6 +126,17 @@ def to_mlflow_records(records: Iterable[SeedRecord], shape: RequestShape) -> lis
             }
         )
     return out
+
+
+def seed_hash(records: Iterable[SeedRecord], shape: RequestShape) -> str:
+    """Eight hex characters identifying the dataset content this seed produces.
+
+    Hashes the records exactly as MLflow will store them, with sorted keys, so a
+    whitespace edit to the JSONL file keeps the hash and a change of request shape
+    changes it.
+    """
+    canonical = json.dumps(to_mlflow_records(records, shape), sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8]
 
 
 def kinds_by_question(records: Iterable[SeedRecord]) -> dict[str, Kind]:

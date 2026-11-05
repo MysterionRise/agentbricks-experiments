@@ -55,10 +55,15 @@ wrongly, which costs more trust than it saves time.
 
 ## Next 90 days
 
+Update 2026-11-04: Databricks marked Knowledge Assistant and Supervisor Agent as
+legacy on 2026-10-12. Item 3 changed from "add a Supervisor Agent" to a migration
+measured by the same gate.
+
 1. Run the gate on the real workspace; publish the first real report.
 2. Replace the fictional handbook with one real policy area and re-baseline.
-3. Add a Supervisor Agent that can also answer from a shipments table, with
-   routing correctness added to the gate.
+3. Migrate off the legacy Knowledge Assistant: rebuild the assistant with the
+   Agent Bricks CLI so it can also answer from a shipments table, and keep it only
+   if the same gate, with routing correctness added, scores it at least as well.
 4. Decide on a pilot group and a feedback loop.
 
 ## Ask

@@ -53,3 +53,13 @@ spend our effort there.
 - Unit cost at scale beats build cost. Revisit when `reports/latest.md`
   shows a cost per thousand requests that a self-built stack would clearly
   undercut, including the engineers who would run it.
+
+## Amendment, 2026-11-04
+
+Databricks marked Knowledge Assistant and Supervisor Agent as legacy on
+2026-10-12: existing assistants keep working, new agents should use Genie Agents
+(low-code) or the Agent Bricks CLI (code, Beta). The decision above stands for the
+Phase 1 baseline, which exists to be measured. It no longer holds for new work:
+Phase 2 migrates, and ADR 0005 will record that decision and when this one is
+superseded. The "Beta exposure" cost above understated the risk; a GA product
+went legacy within nine months.

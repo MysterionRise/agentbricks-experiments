@@ -11,7 +11,7 @@ authenticated and `pip install -e .` has been run.
 | Volume | `main.ab_demo.ka_data` (`knowledge/`, `reports/`) | same |
 | Knowledge Assistant | display name `halcyon-handbook-ka` | same |
 | Serving endpoint | read from the assistant; `abx deploy` logs it | Databricks managed |
-| Eval dataset | `main.ab_demo.handbook_eval` | same |
+| Eval dataset | `main.ab_demo.handbook_eval_<seed hash>`, one per seed version | same |
 | MLflow experiment | `/Shared/abx/handbook-ka` | same |
 
 Override any of these with `ABX_*` variables or `abx --set ABX_KEY=VALUE`.
@@ -22,8 +22,10 @@ Override any of these with `ABX_*` variables or `abx --set ABX_KEY=VALUE`.
 abx validate
 abx setup        # schema, volume, 13 files under knowledge/
 abx deploy       # creates or reuses the assistant, attaches the files source,
-                 # syncs, polls until ACTIVE (up to 30 min on first build)
-abx eval         # dataset upsert, judges, gate; exit 1 on failure
+                 # updates drifted instructions, syncs, then waits until the
+                 # assistant is ACTIVE, every source has indexed the current
+                 # files, and the endpoint is READY (up to 30 min per wait)
+abx eval         # seed-versioned dataset, judges, gate; exit 1 on gate failure
 abx cost         # needs ABX_SQL_WAREHOUSE_ID
 ```
 
@@ -51,8 +53,8 @@ lost).
    judge's rationale are in the report; every row is in the run.
 2. Sort failures by kind:
    - `out_of_scope` failures: the instructions are too permissive. Tighten
-     `ABX_KA_INSTRUCTIONS` and redeploy; the assistant's instructions are updated
-     only on creation in phase 1, so delete and recreate, or edit in the UI.
+     `ABX_KA_INSTRUCTIONS` and run `abx deploy`; it updates the instructions in
+     place when they differ from the deployed ones.
    - `multi_doc` failures with `direct` passing: retrieval returns one document.
      Shorten documents or add a cross-reference line to each affected document.
    - Widespread `correctness` failures after no change on our side: the vendor

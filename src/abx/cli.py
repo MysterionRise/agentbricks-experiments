@@ -1,7 +1,10 @@
 """``abx`` command line: setup, deploy, eval, cost.
 
 Each subcommand is one job task in the Asset Bundle and one step in the README.
-Exit code 1 means the eval gate failed; 2 means a deploy or query error.
+Exit codes: 0 success, 1 the eval gate failed, 2 any other error (bad input,
+deploy or query failure, unexpected exception). The installed ``abx`` entry point
+is :func:`run`, which turns the code into the process exit status; a Databricks
+wheel task fails only on a non-zero exit or an exception, not on a return value.
 """
 
 from __future__ import annotations
@@ -48,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--no-volume", action="store_true", help="skip mirroring to the volume")
 
     p_cost = sub.add_parser("cost", help="query system tables and refresh the report")
+    p_cost.add_argument("--pyproject", type=Path, default=DEFAULT_PYPROJECT)
     p_cost.add_argument("--out", type=Path, default=DEFAULT_OUT)
     p_cost.add_argument("--no-volume", action="store_true")
 
@@ -113,7 +117,7 @@ def cmd_eval(args: argparse.Namespace, settings: Settings) -> int:
     """Evaluate, gate, and write the report. Exit 1 when the gate fails."""
     from databricks.sdk import WorkspaceClient
 
-    from abx.evaluate import run_evaluation
+    from abx.evaluate import DatasetMismatchError, run_evaluation
     from abx.gate import GateThresholds, apply_gate
     from abx.ka import DeployError, resolve_endpoint_name
     from abx.report import render_report, write_local, write_volume
@@ -128,7 +132,11 @@ def cmd_eval(args: argparse.Namespace, settings: Settings) -> int:
         log.error("%s", exc)
         return 2
 
-    summary = run_evaluation(settings, endpoint, records, seed_path=args.seed)
+    try:
+        summary = run_evaluation(settings, endpoint, records, seed_path=args.seed)
+    except DatasetMismatchError as exc:
+        log.error("%s", exc)
+        return 2
     verdict = apply_gate(summary, thresholds)
     report = render_report(summary, verdict, None, endpoint, settings.eval_dataset_fqn)
     path = write_local(args.out, report, summary)
@@ -148,7 +156,13 @@ def cmd_cost(args: argparse.Namespace, settings: Settings) -> int:
     from abx.cost import fetch_cost
     from abx.gate import GateThresholds, apply_gate
     from abx.ka import DeployError, resolve_endpoint_name
-    from abx.report import read_summary, render_report, write_local, write_volume
+    from abx.report import (
+        read_summary,
+        read_volume_summary,
+        render_report,
+        write_local,
+        write_volume,
+    )
 
     w = WorkspaceClient()
     try:
@@ -157,10 +171,13 @@ def cmd_cost(args: argparse.Namespace, settings: Settings) -> int:
         log.error("%s", exc)
         return 2
     cost = fetch_cost(w, settings, endpoint)
+    # In a job, --out is a fresh /tmp, so the last eval summary lives in the volume.
     summary = read_summary(args.out)
+    if summary is None and not args.no_volume:
+        summary = read_volume_summary(w, settings.reports_path)
     verdict = None
     if summary is not None:
-        verdict = apply_gate(summary, GateThresholds.from_pyproject(DEFAULT_PYPROJECT))
+        verdict = apply_gate(summary, GateThresholds.from_pyproject(args.pyproject))
     report = render_report(summary, verdict, cost, endpoint, settings.eval_dataset_fqn)
     path = write_local(args.out, report, summary)
     if not args.no_volume:
@@ -196,5 +213,17 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def run() -> None:
+    """Console entry point: exit with :func:`main`'s code; exceptions exit 2, not 1."""
+    try:
+        code = main()
+    except SystemExit:
+        raise
+    except Exception:
+        log.exception("abx failed with an unexpected error")
+        code = 2
+    sys.exit(code)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    run()

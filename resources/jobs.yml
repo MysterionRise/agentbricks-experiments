@@ -25,9 +25,11 @@ resources:
       environments:
         - environment_key: abx
           spec:
-            client: "2"
+            # Serverless environment 4 runs Python 3.12; the package requires >=3.12.
+            environment_version: "4"
             dependencies:
-              - ./dist/*.whl
+              # Resolved relative to this file, so ../dist is the bundle root's dist/.
+              - ../dist/*.whl
               - databricks-agents>=1.0
 
     deploy_ka_job:
@@ -47,9 +49,11 @@ resources:
       environments:
         - environment_key: abx
           spec:
-            client: "2"
+            # Serverless environment 4 runs Python 3.12; the package requires >=3.12.
+            environment_version: "4"
             dependencies:
-              - ./dist/*.whl
+              # Resolved relative to this file, so ../dist is the bundle root's dist/.
+              - ../dist/*.whl
               - databricks-agents>=1.0
 
     eval_job:
@@ -82,9 +86,11 @@ resources:
       environments:
         - environment_key: abx
           spec:
-            client: "2"
+            # Serverless environment 4 runs Python 3.12; the package requires >=3.12.
+            environment_version: "4"
             dependencies:
-              - ./dist/*.whl
+              # Resolved relative to this file, so ../dist is the bundle root's dist/.
+              - ../dist/*.whl
               - databricks-agents>=1.0
 
     cost_job:
@@ -103,12 +109,16 @@ resources:
               - "--set"
               - "ABX_SQL_WAREHOUSE_ID=${var.sql_warehouse_id}"
               - "cost"
+              - "--pyproject"
+              - "${workspace.file_path}/pyproject.toml"
               - "--out"
               - "/tmp/abx-reports"
       environments:
         - environment_key: abx
           spec:
-            client: "2"
+            # Serverless environment 4 runs Python 3.12; the package requires >=3.12.
+            environment_version: "4"
             dependencies:
-              - ./dist/*.whl
+              # Resolved relative to this file, so ../dist is the bundle root's dist/.
+              - ../dist/*.whl
               - databricks-agents>=1.0

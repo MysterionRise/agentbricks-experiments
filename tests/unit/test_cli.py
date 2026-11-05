@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -55,3 +56,29 @@ def test_cost_keeps_previous_eval(monkeypatch, tmp_path: Path):
     text = (tmp_path / "latest.md").read_text()
     assert "**Verdict: PASS**" in text
     assert "| Requests | 5 |" in text
+
+
+def test_cost_in_a_job_reads_the_eval_summary_from_the_volume(monkeypatch, tmp_path: Path):
+    """In a job --out is an empty /tmp; the last eval summary lives in the volume."""
+    from abx import cost as cost_mod
+    from abx import ka
+    from abx import report as report_mod
+    from abx.cost import CostSummary
+    from abx.gate import EvalSummary
+
+    calls = []
+
+    def fake_volume_summary(w, volume_dir):
+        calls.append(volume_dir)
+        return EvalSummary("from-volume", 40, {}, 1.0, 1.0, 1.0, 1.0, 0)
+
+    monkeypatch.setattr("databricks.sdk.WorkspaceClient", lambda: MagicMock())
+    monkeypatch.setattr(ka, "resolve_endpoint_name", lambda w, s: "ep")
+    monkeypatch.setattr(
+        cost_mod, "fetch_cost", lambda w, s, e: CostSummary(e, 7, False, note="n/a")
+    )
+    monkeypatch.setattr(report_mod, "read_volume_summary", fake_volume_summary)
+    monkeypatch.setattr(report_mod, "write_volume", lambda *a, **k: None)
+    assert cli.main(["cost", "--out", str(tmp_path / "empty")]) == 0
+    assert calls == ["/Volumes/main/ab_demo/ka_data/reports"]
+    assert "MLflow run `from-volume`" in (tmp_path / "empty" / "latest.md").read_text()

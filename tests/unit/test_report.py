@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -63,3 +64,31 @@ def test_write_volume_uploads_both_files():
     write_volume(w, "/Volumes/x/reports", "text", summary)
     uploaded = [c.args[0] for c in w.files.upload.call_args_list]
     assert uploaded == ["/Volumes/x/reports/latest.md", "/Volumes/x/reports/eval_summary.json"]
+
+
+def test_read_volume_summary_round_trips_and_handles_absence():
+    import io
+
+    from databricks.sdk.errors import NotFound
+    from databricks.sdk.service.files import DownloadResponse
+
+    from abx.report import read_volume_summary
+
+    summary = EvalSummary("r", 1, {"direct": 1}, 1.0, 1.0, None, None, 0, dataset_fqn="c.s.d_1")
+    payload = json.dumps(summary.as_dict()).encode()
+    w = MagicMock()
+    w.files.download.return_value = DownloadResponse(contents=io.BytesIO(payload))
+    assert read_volume_summary(w, "/Volumes/x/reports") == summary
+    w.files.download.assert_called_once_with("/Volumes/x/reports/eval_summary.json")
+
+    w.files.download.side_effect = NotFound("missing")
+    assert read_volume_summary(w, "/Volumes/x/reports") is None
+
+
+def test_report_names_the_dataset_from_the_summary():
+    summary = EvalSummary(
+        "r", 1, {}, None, None, None, None, 0, dataset_fqn="c.s.handbook_eval_ab12cd34"
+    )
+    verdict = GateVerdict(passed=True, reasons=[])
+    text = render_report(summary, verdict, None, "ep", "c.s.handbook_eval", WHEN)
+    assert "Dataset `c.s.handbook_eval_ab12cd34`" in text

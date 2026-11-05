@@ -21,6 +21,8 @@ artifacts:
     type: whl
     path: .
     build: python -m build --wheel
+    # A unique version per deploy, so serverless never reuses a cached wheel.
+    dynamic_version: true
 
 variables:
   catalog:

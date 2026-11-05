@@ -54,6 +54,35 @@ consistently. Once a real run shows it is populated, it becomes a gate.
 - A weekly scheduled run (paused by default in `resources/jobs.yml`) turns the
   same gate into drift detection.
 
+## Amendment, 2026-11-04 (before any run)
+
+Written before the first workspace run, so no result informed it. A review of
+the Phase 1 code against MLflow 3.17 found that the gate as built could not
+produce an honest verdict. The decision above stands; these details change:
+
+- **Rows are matched by seed id.** MLflow's result table has no `inputs`
+  column. Each dataset record's tags (`seed_id`, `kind`) are copied onto its
+  trace, and the gate reads them from there.
+- **Each judge runs only where it applies, in one run.** Built-in judges raise
+  on rows without the expectation they need. Correctness and relevance are
+  wrapped to skip rows without `expected_facts`, the refusal judge to skip rows
+  without `guidelines`. Safety runs on every row. One run keeps one run id and
+  the link to the Unity Catalog dataset.
+- **Relevance is scoped to answerable rows.** A correct refusal ("the handbook
+  does not cover this") is not relevant to the question it declines, so judging
+  it would push relevance under 0.85 even for a perfect assistant. The 0.85
+  threshold is unchanged; its denominator is now the 31 answerable rows.
+- **A missing verdict is a failure.** A judge error, timeout or absent column on
+  a row the judge applies to counts against that judge's rate and is reported
+  per judge. A row without a safety verdict fails the gate on its own. Only
+  retrieval groundedness, which is reported and not gated, skips missing values.
+- **Coverage is checked by id.** Every seed id must come back in the results; a
+  missing, unmatched or errored row fails the gate. `min_rows_evaluated` stays
+  as a second guard.
+- **MLflow is pinned to 3.17.x.** `tests/contract` runs a real local
+  `mlflow.genai.evaluate` and asserts the columns the gate reads; upgrading MLflow
+  means re-running that contract first.
+
 ## What this does not do
 
 It does not measure latency, cost, or user satisfaction. Cost is ADR 0003.

@@ -63,6 +63,16 @@ def test_duplicate_ids_rejected(tmp_path: Path):
         load_seed(path)
 
 
+def test_duplicate_questions_rejected(tmp_path: Path):
+    """MLflow de-duplicates dataset records on inputs, so a repeated question would vanish."""
+    a = {"id": "a", "kind": "direct", "question": "Same?", "expected_facts": ["f"]}
+    b = {"id": "b", "kind": "direct", "question": "Same?", "expected_facts": ["g"]}
+    path = tmp_path / "seed.jsonl"
+    path.write_text("\n".join([json.dumps(a), json.dumps(b)]))
+    with pytest.raises(ValueError, match="duplicate question"):
+        load_seed(path)
+
+
 def test_empty_seed_rejected(tmp_path: Path):
     path = tmp_path / "seed.jsonl"
     path.write_text("\n\n")
@@ -97,3 +107,15 @@ def test_to_mlflow_records_shapes_expectations():
     assert out[0]["tags"] == {"seed_id": "d", "kind": "direct"}
     assert out[1]["expectations"] == {"guidelines": ["refuse"]}
     assert kinds_by_question(records) == {"Direct?": "direct", "Scope?": "out_of_scope"}
+
+
+def test_seed_hash_tracks_content_and_shape_not_formatting():
+    from abx.seed import seed_hash
+
+    a = [SeedRecord(id="d", kind="direct", question="Direct?", expected_facts=["f1"])]
+    same = [SeedRecord.model_validate(a[0].model_dump())]
+    edited = [SeedRecord(id="d", kind="direct", question="Direct, edited?", expected_facts=["f1"])]
+    assert seed_hash(a, "responses") == seed_hash(same, "responses")
+    assert len(seed_hash(a, "responses")) == 8
+    assert seed_hash(a, "responses") != seed_hash(edited, "responses")
+    assert seed_hash(a, "responses") != seed_hash(a, "chat")

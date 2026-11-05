@@ -39,6 +39,20 @@ will keep it running if that number is a surprise later.
 - The schema has one named owner. The runbook lists who that is per
   environment.
 
+## Amendment, 2026-11-04
+
+Two statements above are wrong and are corrected here rather than rewritten:
+
+- **Rate limits.** AI Gateway on agent endpoints supports inference tables only
+  (per the `put_ai_gateway` SDK documentation). Per-user rate limits and usage
+  tracking are not available for the Knowledge Assistant endpoint, so
+  `system.serving.endpoint_usage` may hold no rows for it. `abx cost` reports
+  "unavailable" in that case instead of showing zero requests.
+- **Budget policy.** A Knowledge Assistant has no budget-policy field in the SDK.
+  Spend is capped with a workspace serverless budget policy and alert instead.
+
+Both are rechecked on the first workspace run.
+
 ## Consequences
 
 - The README can show a cost line that a Finance partner can reconcile to the
